@@ -11,10 +11,17 @@ ak_id='AccessKeyId'
 ak_sec='Access Key Secret'
 main_dm='hanxi.info'
 sub_dm='www'
+type='AAAA'
+DEBUG=1
 ##########################################
 
 intelnetip() {
-    tmp_ip=`curl -sL --connect-timeout 3   ns1.dnspod.net:6666`
+    if [ "$type" == "AAAA" ]; then
+      tmp_ip=$(ip -6 addr show |grep inet6|grep global|awk '{print $2}'|cut -d/ -f1)
+    fi
+    if [ "Z$tmp_ip" == "Z" ]; then 
+      tmp_ip=`curl -sL --connect-timeout 3   ns1.dnspod.net:6666`
+    fi
     if [ "Z$tmp_ip" == "Z" ]; then
         tmp_ip=`curl -sL --connect-timeout 3 members.3322.org/dyndns/getip`
     fi
@@ -25,6 +32,7 @@ intelnetip() {
         tmp_ip=`curl -sL --connect-timeout 3 whatismyip.akamai.com`
     fi
     echo -n $tmp_ip
+
 }
 
 nslookupip() {
@@ -53,6 +61,9 @@ resolve2ip() {
 log()
 {
     logger -t aliddns $*
+    if [ $DEBUG == 1 ]; then
+      echo $*
+    fi
 }
 
 check_aliddns() {
@@ -61,7 +72,9 @@ check_aliddns() {
         log "ERROR, cant get WAN-IP..."
         return 0
     fi
-    current_ip=$(resolve2ip "$sub_dm.$main_dm")
+    if [ "Z$current_ip" == "Z" ]; then    
+      current_ip=$(resolve2ip "$sub_dm.$main_dm")
+    fi
     if [ "Z$current_ip" == "Z" ]; then
         rrid='' # NO Resolve IP Means new Record_ID
     fi
@@ -90,7 +103,8 @@ urlencode() {
 send_request() {
     # send_request action<string> args<string>
     local args="AccessKeyId=$ak_id&Action=$1&Format=json&$2&Version=2015-01-09"
-    local hash=$(urlencode $(echo -n "GET&%2F&$(urlencode $args)" | openssl dgst -sha1 -hmac "$ak_sec&" -binary | openssl base64))
+    local str="GET&%2F&$(urlencode $args)"
+    local hash=$(urlencode $(echo -n $str | openssl dgst -sha1 -hmac "$ak_sec&" -binary | openssl base64))
     curl -sSL --connect-timeout 5 "http://alidns.aliyuncs.com/?$args&Signature=$hash"
 }
 
@@ -98,12 +112,28 @@ get_recordid() {
     sed 's/RR/\n/g' | sed -n 's/.*RecordId[^0-9]*\([0-9]*\).*/\1\n/p' | sort -ru | sed /^$/d
 }
 
+get_ip() {
+   sed 's/RR/\n/g' | sed -n 's/.*Value[^0-9a-zA-Z]*\([0-9a-zA-Z:.]*\).*/\1\n/p' | sort -ru | sed /^$/d
+}
+
+get_value() {
+   value=$(query_recordid)
+   rrid=$(echo -n $value | get_recordid)
+   current_ip=$(echo -n $value| get_ip)
+   if [ "Z$rrid" != "Z" ]; then
+     log "$rrid" > /tmp/rrid
+     log "$current_ip" > /tmp/rridip
+     log "SAVE rrid:$rrid, ip:$current_ip"
+   fi
+}
+
 query_recordid() {
     send_request "DescribeSubDomainRecords" "SignatureMethod=HMAC-SHA1&SignatureNonce=$timestamp&SignatureVersion=1.0&SubDomain=$sub_dm.$main_dm&Timestamp=$timestamp"
 }
 
 update_record() {
-    send_request "UpdateDomainRecord" "RR=$sub_dm&RecordId=$1&SignatureMethod=HMAC-SHA1&SignatureNonce=$timestamp&SignatureVersion=1.0&Timestamp=$timestamp&Type=A&Value=$ip"
+    ip=$(urlencode $ip)
+    send_request "UpdateDomainRecord" "RR=$sub_dm&RecordId=$1&SignatureMethod=HMAC-SHA1&SignatureNonce=$timestamp&SignatureVersion=1.0&Timestamp=$timestamp&Type=$type&Value=$ip"
 }
 
 do_ddns_record() {
@@ -114,7 +144,7 @@ do_ddns_record() {
         # failed
         log "ERROR, Please Check SubDomain Exists."
     else
-        update_record $rrid >/dev/null 2>&1
+        update_record $rrid > /dev/null 2>&1
         log "UPDATE record $rrid"
 
         # save rrid
@@ -128,8 +158,13 @@ do_ddns_record() {
     ( log "Need [ openssl + curl + sed ]" && exit 1 )
 
 rrid=$([ -f /tmp/rrid ] && cat /tmp/rrid)
+current_ip=$([ -f /tmp/rridip ] && cat /tmp/rridip)
 ip=$(intelnetip)
 DATE=$(date +'%Y-%m-%d %H:%M:%S')
 timestamp=$(date -u "+%Y-%m-%dT%H%%3A%M%%3A%SZ")
+
+if [ "Z$current_ip" == "Z" ]; then                                                  
+   get_value
+fi
 
 check_aliddns || do_ddns_record
